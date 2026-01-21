@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
+use image::GenericImageView;
 
 use crate::file_processors::FileType;
 use crate::OcrResult;
@@ -29,17 +30,16 @@ pub fn extract_metadata(file_path: &Path, file_type: &FileType) -> HashMap<Strin
 
     if let Ok(file_meta) = file_path.metadata() {
         metadata.insert("size".to_string(), format!("{} bytes", file_meta.len()));
-        metadata.insert(
-            "modified".to_string(),
-            format!("{:?}", file_meta.modified().unwrap_or_default()),
-        );
+        if let Ok(modified) = file_meta.modified() {
+            metadata.insert("modified".to_string(), format!("{:?}", modified));
+        }
     }
 
     // Add type-specific metadata
     match file_type {
         FileType::Image(_) => {
             if let Ok(img) = image::open(file_path) {
-                let (width, height) = img.dimensions();
+                let (width, height) = GenericImageView::dimensions(&img);
                 metadata.insert("dimensions".to_string(), format!("{}x{}", width, height));
                 metadata.insert("color_type".to_string(), format!("{:?}", img.color()));
             }
@@ -131,7 +131,7 @@ pub fn generate_report(results: &[OcrResult], output_dir: &Path) -> Result<(), B
     let mut type_counts: HashMap<String, usize> = HashMap::new();
     let mut type_chars: HashMap<String, usize> = HashMap::new();
 
-    for result in successful {
+    for result in &successful {
         *type_counts.entry(result.file_type.clone()).or_insert(0) += 1;
         *type_chars.entry(result.file_type.clone()).or_insert(0) += result.text.chars().count();
     }

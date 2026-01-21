@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use calamine::{Reader, Xlsx, open_workbook};
+use calamine::{Reader, Xlsx, open_workbook, Data};
 use docx_rs::read_docx;
 
 use crate::ocr_engine::OcrEngine;
@@ -49,6 +49,19 @@ pub struct ProcessResult {
 /// Main file processor
 pub struct FileProcessor {
     use_pdf_ocr: bool,
+}
+
+fn extract_text_from_paragraph(p: &docx_rs::Paragraph, text: &mut String) {
+    for p_child in &p.children {
+        if let docx_rs::ParagraphChild::Run(r) = p_child {
+            for r_child in &r.children {
+                if let docx_rs::RunChild::Text(t) = r_child {
+                    text.push_str(&t.text);
+                    text.push(' ');
+                }
+            }
+        }
+    }
 }
 
 impl FileProcessor {
@@ -129,7 +142,7 @@ impl FileProcessor {
         // Get page count
         let page_count = FileOptions::cached()
             .load(&pdf_data)
-            .map(|pdf| pdf.num_pages())
+            .map(|pdf| pdf.num_pages() as usize)
             .unwrap_or(1);
 
         Ok(vec![ProcessResult {
@@ -186,35 +199,17 @@ impl FileProcessor {
             for child in &document.children {
                 // Extract text from paragraphs
                 if let docx_rs::DocumentChild::Paragraph(p) = child {
-                    for p_child in &p.children {
-                        if let docx_rs::ParagraphChild::Run(r) = p_child {
-                            for r_child in &r.children {
-                                if let docx_rs::RunChild::Text(t) = r_child {
-                                    text.push_str(&t.text);
-                                    text.push(' ');
-                                }
-                            }
-                        }
-                    }
+                    extract_text_from_paragraph(&p, &mut text);
                     text.push('\n');
                 }
 
                 // Extract text from tables
                 if let docx_rs::DocumentChild::Table(tbl) = child {
                     for row in &tbl.rows {
-                        for cell in &row.cells {
+                        for cell in row.cells() {
                             for cell_child in &cell.children {
                                 if let docx_rs::TableCellContent::Paragraph(p) = cell_child {
-                                    for p_child in &p.children {
-                                        if let docx_rs::ParagraphChild::Run(r) = p_child {
-                                            for r_child in &r.children {
-                                                if let docx_rs::RunChild::Text(t) = r_child {
-                                                    text.push_str(&t.text);
-                                                    text.push(' ');
-                                                }
-                                            }
-                                        }
-                                    }
+                                    extract_text_from_paragraph(p, &mut text);
                                 }
                             }
                             text.push('\t'); // Tab separator for cells
@@ -251,15 +246,14 @@ impl FileProcessor {
                     for cell in row.iter() {
                         // Convert cell to string
                         let cell_text = match cell {
-                            calamine::DataType::String(s) => s.to_string(),
-                            calamine::DataType::Float(f) => f.to_string(),
-                            calamine::DataType::Int(i) => i.to_string(),
-                            calamine::DataType::Bool(b) => b.to_string(),
-                            calamine::DataType::DateTime(dt) => dt.to_string(),
-                            calamine::DataType::Duration(d) => d.to_string(),
-                            calamine::DataType::Time(t) => t.to_string(),
-                            calamine::DataType::Error(e) => format!("[Error: {:?}]", e),
-                            _ => String::new(),
+                            Data::String(s) => s.to_string(),
+                            Data::Float(f) => f.to_string(),
+                            Data::Int(i) => i.to_string(),
+                            Data::Bool(b) => b.to_string(),
+                            Data::DateTimeIso(s) => s.clone(),
+                            Data::DurationIso(s) => s.clone(),
+                            Data::Error(e) => format!("[Error: {:?}]", e),
+                            Data::Empty => String::new(),
                         };
 
                         text.push_str(&cell_text);

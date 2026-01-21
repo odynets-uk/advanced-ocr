@@ -1,5 +1,5 @@
 use std::error::Error;
-use tesseract::{Tesseract, TessError};
+use tesseract::{Tesseract, TesseractError};
 
 /// OCR Engine wrapper for Tesseract
 pub struct OcrEngine {
@@ -18,21 +18,19 @@ impl OcrEngine {
         })
     }
 
-    pub fn extract_text_from_image(&self, image_path: &std::path::Path) -> Result<String, TessError> {
-        let mut tesseract = Tesseract::new(None, Some(&self.language))?;
-        tesseract.set_image(&image_path.to_string_lossy())?;
+    pub fn extract_text_from_image(&self, image_path: &std::path::Path) -> Result<String, Box<dyn Error>> {
+        let mut tesseract = Tesseract::new(None, Some(&self.language))?
+            .set_image(&image_path.to_string_lossy())?
+            .set_variable("preserve_interword_spaces", "1")?;
 
-        // Configure for better text extraction
-        tesseract.set_variable("preserve_interword_spaces", "1")?;
-
-        tesseract.get_text()
+        Ok(tesseract.get_text()?)
     }
 
-    pub fn extract_text_from_image_data(&self, image_data: &[u8]) -> Result<String, TessError> {
-        let mut tesseract = Tesseract::new(None, Some(&self.language))?;
-        tesseract.set_image_from_mem(image_data, "png")?;
-        tesseract.set_variable("preserve_interword_spaces", "1")?;
+    pub fn extract_text_from_image_data(&self, image_data: &[u8]) -> Result<String, Box<dyn Error>> {
+        let mut tesseract = Tesseract::new(None, Some(&self.language))?
+            .set_image_from_mem(image_data)?
+            .set_variable("preserve_interword_spaces", "1")?;
 
-        tesseract.get_text()
+        Ok(tesseract.get_text()?)
     }
 }
