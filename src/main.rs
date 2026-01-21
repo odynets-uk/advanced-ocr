@@ -1,13 +1,10 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
-use cached::proc_macro::cached;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use log::{error, info, warn};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
@@ -16,7 +13,7 @@ mod file_processors;
 mod ocr_engine;
 mod utils;
 
-use crate::file_processors::{FileProcessor, FileType, ProcessResult};
+use crate::file_processors::{FileProcessor, FileType};
 use crate::ocr_engine::OcrEngine;
 use crate::utils::{extract_metadata, generate_report, save_results, setup_directories};
 

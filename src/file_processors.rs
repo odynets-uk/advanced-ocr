@@ -141,7 +141,7 @@ impl FileProcessor {
 
         // Get page count
         let page_count = FileOptions::cached()
-            .load(&pdf_data)
+            .load(&pdf_data.as_slice())
             .map(|pdf| pdf.num_pages() as usize)
             .unwrap_or(1);
 
@@ -160,17 +160,17 @@ impl FileProcessor {
         use pdf::file::FileOptions;
 
         let pdf_data = fs::read(path)?;
-        let pdf = FileOptions::cached().load(&pdf_data)?;
+        let pdf = FileOptions::cached().load(pdf_data.as_slice())?;
         let mut combined_text = String::new();
 
-        for (i, page) in pdf.pages().enumerate() {
-            let page = page?;
+        for page_result in pdf.pages() {
+            let page = page_result?;
 
             // Try to extract images from PDF page
             if let Some(resources) = page.resources() {
                 for (_, xobject) in &resources.xobjects {
                     if let pdf::object::XObject::Image(ref image) = *xobject {
-                        if let Ok(image_data) = image.data() {
+                        if let Some(image_data) = image.image_data() {
                             match ocr_engine.extract_text_from_image_data(&image_data) {
                                 Ok(text) if !text.trim().is_empty() => {
                                     combined_text.push_str(&format!("\n--- Page {} ---\n", i + 1));

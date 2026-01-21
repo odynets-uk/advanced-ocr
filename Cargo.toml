@@ -5,15 +5,16 @@ edition = "2024"
 
 [dependencies]
 ## Core OCR
-tesseract = "0.15.2"
+#tesseract = "0.15.2"
+rusty-tesseract = "1.1.10"
 
 # Image processing
 image = "0.25.9"
 imageproc = "0.26.0"
 
-# PDF processing
-pdf = "0.9.1"
-pdf-extract = "0.10.0"
+# PDF processing (v0.8/0.7 через конфлікт lzma-rust2 з crc в v0.9)
+pdf = "0.8.1"
+pdf-extract = "0.7.12"
 poppler = "0.6" # to convert pdf to image
 
 # Office documents (DOCX, XLSX)
@@ -47,4 +48,3 @@ thiserror = "2.0.18"
 zip = "7.2.0"
 #tar = "0.4"
 flate2 = "1.0"
-
