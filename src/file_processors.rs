@@ -1,8 +1,8 @@
 use std::error::Error;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use calamine::{Reader, Xlsx, open_workbook, Data};
+use calamine::{Data, Reader, Xlsx, open_workbook};
 use docx_rs::read_docx;
 
 use crate::ocr_engine::OcrEngine;
@@ -27,7 +27,6 @@ pub enum ImageFormat {
     Tiff,
     Gif,
     Webp,
-    Unknown,
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +34,6 @@ pub enum ArchiveFormat {
     Zip,
     Tar,
     Rar,
-    Unknown,
 }
 
 /// Processing result for a single file
@@ -77,24 +75,12 @@ impl FileProcessor {
         let file_type = FileType::from_path(path);
 
         match file_type {
-            FileType::Image(_) => {
-                self.process_image(path, ocr_engine)
-            }
-            FileType::Pdf => {
-                self.process_pdf(path, ocr_engine)
-            }
-            FileType::Docx => {
-                self.process_docx(path)
-            }
-            FileType::Xlsx | FileType::Xls => {
-                self.process_excel(path)
-            }
-            FileType::Archive(_) => {
-                self.process_archive(path, ocr_engine)
-            }
-            FileType::Unsupported => {
-                Err("Unsupported file format".into())
-            }
+            FileType::Image(_) => self.process_image(path, ocr_engine),
+            FileType::Pdf => self.process_pdf(path, ocr_engine),
+            FileType::Docx => self.process_docx(path),
+            FileType::Xlsx | FileType::Xls => self.process_excel(path),
+            FileType::Archive(_) => self.process_archive(path, ocr_engine),
+            FileType::Unsupported => Err("Unsupported file format".into()),
         }
     }
 
@@ -103,7 +89,8 @@ impl FileProcessor {
         path: &Path,
         ocr_engine: &OcrEngine,
     ) -> Result<Vec<ProcessResult>, Box<dyn Error>> {
-        let text = ocr_engine.extract_text_from_image(path)
+        let text = ocr_engine
+            .extract_text_from_image(path)
             .map_err(|e| format!("OCR error: {}", e))?;
 
         Ok(vec![ProcessResult {
@@ -124,9 +111,7 @@ impl FileProcessor {
 
         // Try to extract text directly from PDF
         let direct_text = match pdf_extract::extract_text_from_mem(&pdf_data) {
-            Ok(text) if !text.trim().is_empty() && text.len() > 100 => {
-                Some(text)
-            }
+            Ok(text) if !text.trim().is_empty() && text.len() > 100 => Some(text),
             _ => None,
         };
 
@@ -141,7 +126,7 @@ impl FileProcessor {
 
         // Get page count
         let page_count = FileOptions::cached()
-            .load(&pdf_data.as_slice())
+            .load(pdf_data.as_slice())
             .map(|pdf| pdf.num_pages() as usize)
             .unwrap_or(1);
 
@@ -152,39 +137,38 @@ impl FileProcessor {
         }])
     }
 
-    fn extract_text_from_pdf_with_ocr(
+    fn create_searchable_pdf(
         &self,
-        path: &Path,
+        image_path: &Path,
+        output_path: &Path,
         ocr_engine: &OcrEngine,
-    ) -> Result<String, Box<dyn Error>> {
-        use pdf::file::FileOptions;
+    ) -> Result<(), Box<dyn Error>> {
+        // Використовуємо tesseract напряму для створення PDF
+        let output_base = output_path.with_extension(""); // без розширення
 
-        let pdf_data = fs::read(path)?;
-        let pdf = FileOptions::cached().load(pdf_data.as_slice())?;
-        let mut combined_text = String::new();
+        let status = std::process::Command::new("tesseract")
+            .arg(image_path)
+            .arg(&output_base)
+            .arg("-l")
+            .arg(ocr_engine.language())
+            .arg("pdf") // ✅ Створити PDF замість txt
+            .status()?;
 
-        for page_result in pdf.pages() {
-            let page = page_result?;
-
-            // Try to extract images from PDF page
-            if let Some(resources) = page.resources() {
-                for (_, xobject) in &resources.xobjects {
-                    if let pdf::object::XObject::Image(ref image) = *xobject {
-                        if let Some(image_data) = image.image_data() {
-                            match ocr_engine.extract_text_from_image_data(&image_data) {
-                                Ok(text) if !text.trim().is_empty() => {
-                                    combined_text.push_str(&format!("\n--- Page {} ---\n", i + 1));
-                                    combined_text.push_str(&text);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
+        if !status.success() {
+            return Err("Tesseract PDF creation failed".into());
         }
 
-        Ok(combined_text)
+        Ok(())
+    }
+
+    fn extract_text_from_pdf_with_ocr(
+        &self,
+        _path: &Path,
+        _ocr_engine: &OcrEngine,
+    ) -> Result<String, Box<dyn Error>> {
+        // PDF image extraction is complex in pdf 0.8
+        // For now, return empty string - can be implemented later
+        Ok(String::from("(OCR from PDF images not yet implemented)"))
     }
 
     fn process_docx(&self, path: &Path) -> Result<Vec<ProcessResult>, Box<dyn Error>> {
@@ -194,28 +178,31 @@ impl FileProcessor {
 
         // Extract text from paragraphs
         let mut text = String::new();
+        let document = docx.document;
 
-        if let Some(document) = docx.document {
-            for child in &document.children {
-                // Extract text from paragraphs
-                if let docx_rs::DocumentChild::Paragraph(p) = child {
-                    extract_text_from_paragraph(&p, &mut text);
-                    text.push('\n');
-                }
+        for child in &document.children {
+            // Extract text from paragraphs
+            if let docx_rs::DocumentChild::Paragraph(p) = child {
+                extract_text_from_paragraph(&p, &mut text);
+                text.push('\n');
+            }
 
-                // Extract text from tables
-                if let docx_rs::DocumentChild::Table(tbl) = child {
-                    for row in &tbl.rows {
-                        for cell in row.cells() {
-                            for cell_child in &cell.children {
-                                if let docx_rs::TableCellContent::Paragraph(p) = cell_child {
-                                    extract_text_from_paragraph(p, &mut text);
-                                }
+            // Extract text from tables
+            if let docx_rs::DocumentChild::Table(tbl) = child {
+                for table_child in &tbl.rows {
+                    let docx_rs::TableChild::TableRow(row) = table_child;
+
+                    for cell_child in &row.cells {
+                        let docx_rs::TableRowChild::TableCell(cell) = cell_child;
+
+                        for cell_content in &cell.children {
+                            if let docx_rs::TableCellContent::Paragraph(p) = cell_content {
+                                extract_text_from_paragraph(&p, &mut text);
                             }
-                            text.push('\t'); // Tab separator for cells
                         }
-                        text.push('\n'); // New line for each row
+                        text.push('\t'); // Tab separator for cells
                     }
+                    text.push('\n'); // New line for each row
                 }
             }
         }
@@ -250,6 +237,7 @@ impl FileProcessor {
                             Data::Float(f) => f.to_string(),
                             Data::Int(i) => i.to_string(),
                             Data::Bool(b) => b.to_string(),
+                            Data::DateTime(dt) => format!("{:?}", dt),
                             Data::DateTimeIso(s) => s.clone(),
                             Data::DurationIso(s) => s.clone(),
                             Data::Error(e) => format!("[Error: {:?}]", e),

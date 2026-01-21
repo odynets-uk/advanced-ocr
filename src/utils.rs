@@ -8,6 +8,7 @@ use crate::file_processors::FileType;
 use crate::OcrResult;
 
 /// Setup input and output directories
+#[allow(dead_code)]
 pub fn setup_directories(input_dir: &Path, output_dir: &Path) -> Result<(), Box<dyn Error>> {
     if !input_dir.exists() {
         fs::create_dir_all(input_dir)?;
@@ -61,17 +62,28 @@ pub fn extract_metadata(file_path: &Path, file_type: &FileType) -> HashMap<Strin
 }
 
 /// Save processing results to disk
+/// Save processing results to disk
 pub fn save_results(
     results: &[OcrResult],
     output_dir: &Path,
     save_individual_files: bool,
 ) -> Result<(), Box<dyn Error>> {
-    // Save to CSV
+    // Save to CSV (without metadata field)
     let csv_path = output_dir.join("results.csv");
     let mut wtr = csv::Writer::from_path(&csv_path)?;
 
+    // Write header manually
+    wtr.write_record(&["filename", "file_type", "page_count", "text_length", "processing_time_ms", "error"])?;
+
     for result in results {
-        wtr.serialize(result)?;
+        wtr.write_record(&[
+            &result.filename,
+            &result.file_type,
+            &result.page_count.to_string(),
+            &result.text.len().to_string(),  // ✅ Змінено: довжина замість повного тексту
+            &result.processing_time_ms.to_string(),
+            &result.error.as_ref().unwrap_or(&String::new()),
+        ])?;
     }
     wtr.flush()?;
     log::info!("Results saved to: {}", csv_path.display());
@@ -95,7 +107,7 @@ pub fn save_results(
         log::info!("Text files saved to: {}", texts_dir.display());
     }
 
-    // Save metadata as JSON
+    // Save full metadata as JSON (включаючи metadata)
     let json_path = output_dir.join("metadata.json");
     let json_data = serde_json::to_string_pretty(&results)?;
     fs::write(&json_path, json_data)?;
@@ -156,7 +168,7 @@ pub fn generate_report(results: &[OcrResult], output_dir: &Path) -> Result<(), B
     }
 
     // Top files by text size
-    let mut sorted_by_size: Vec<&OcrResult> = successful.iter().collect();
+    let mut sorted_by_size = successful.clone();
     sorted_by_size.sort_by(|a, b| b.text.len().cmp(&a.text.len()));
 
     if !sorted_by_size.is_empty() {

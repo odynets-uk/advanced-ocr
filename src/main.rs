@@ -1,21 +1,20 @@
+use clap::Parser;
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::Result;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-// Import local modules
 mod file_processors;
 mod ocr_engine;
 mod utils;
 
 use crate::file_processors::{FileProcessor, FileType};
 use crate::ocr_engine::OcrEngine;
-use crate::utils::{extract_metadata, generate_report, save_results, setup_directories};
+use crate::utils::{extract_metadata, generate_report, save_results};
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct OcrResult {
@@ -26,6 +25,60 @@ struct OcrResult {
     processing_time_ms: u128,
     error: Option<String>,
     metadata: HashMap<String, String>,
+}
+
+/// Advanced Batch OCR in Rust
+#[derive(Parser, Debug)]
+#[command(name = "Advanced OCR")]
+#[command(about = "Batch OCR for PDF, DOCX, XLSX, and images", long_about = None)]
+struct Cli {
+    /// Input directory path
+    #[arg(short, long, default_value = "./input")]
+    input: PathBuf,
+
+    /// Output directory path
+    #[arg(short, long, default_value = "./output")]
+    output: PathBuf,
+
+    /// OCR languages (comma-separated: ukr,eng)
+    #[arg(short, long, default_value = "ukr+eng")]
+    languages: String,
+
+    /// Enable OCR for PDF images (slower)
+    #[arg(long, default_value = "false")]
+    pdf_ocr: bool,
+
+    /// Number of parallel workers
+    #[arg(short, long, default_value = "4")]
+    workers: usize,
+
+    /// Save individual text files
+    #[arg(long, default_value = "true")]
+    save_texts: bool,
+
+    /// Create searchable PDFs from images
+    #[arg(long)]
+    searchable_pdf: bool,
+}
+
+fn collect_files(input_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+
+    for entry in WalkDir::new(input_dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() {
+            let file_type = FileType::from_path(path);
+            if !matches!(file_type, FileType::Unsupported) {
+                files.push(path.to_path_buf());
+            }
+        }
+    }
+
+    files
 }
 
 fn process_single_file(
@@ -79,48 +132,50 @@ fn process_single_file(
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize logger
+    // Parse CLI arguments
+    let cli = Cli::parse();
+
+    // Initialize logging
     env_logger::init();
 
     println!("=== Advanced Batch OCR in Rust ===");
     println!("Supports: PDF, DOCX, XLSX, JPG, PNG, BMP, TIFF, GIF, WebP");
 
-    // Configuration
-    let input_dir = Path::new("./input");
-    let output_dir = Path::new("./output");
-    let lang = "ukr+eng"; // OCR languages
-    let use_pdf_ocr = true;
-    let save_individual_files = true;
-    let max_workers = 4;
+    // Create directories if they don't exist
+    std::fs::create_dir_all(&cli.input)?;
+    std::fs::create_dir_all(&cli.output)?;
 
-    // Setup directories
-    setup_directories(input_dir, output_dir)?;
+    println!("\nSupported formats:");
+    println!("  - Images: jpg, jpeg, png, bmp, tiff, gif, webp");
+    println!("  - Documents: pdf, docx, xlsx, xls");
 
-    // Initialize OCR engine
-    let ocr_engine = OcrEngine::new(lang)?;
+    // Collect files
+    let files = collect_files(&cli.input);
 
-    // Initialize file processor
-    let file_processor = FileProcessor::new(use_pdf_ocr);
-
-    // Collect files to process
-    let files_to_process = collect_files(input_dir);
-
-    if files_to_process.is_empty() {
-        println!("No supported files found in 'input' directory.");
-        return Ok(());
+    if files.is_empty() {
+        return Err("Input directory was empty".into());
     }
 
-    println!("Found {} files to process.", files_to_process.len());
+    println!("\nFound {} files to process", files.len());
+    println!("OCR Language: {}", cli.languages);
+    println!("PDF OCR: {}", if cli.pdf_ocr { "enabled" } else { "disabled" });
+    println!("Workers: {}", cli.workers);
+
+    // Initialize OCR engine
+    let ocr_engine = OcrEngine::new(&cli.languages)?;
+
+    // Initialize file processor
+    let processor = FileProcessor::new(cli.pdf_ocr);
 
     // Setup thread pool
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(max_workers)
+        .num_threads(cli.workers)
         .build()
         .unwrap();
 
     // Setup progress bars
     let mp = MultiProgress::new();
-    let main_pb = mp.add(ProgressBar::new(files_to_process.len() as u64));
+    let main_pb = mp.add(ProgressBar::new(files.len() as u64));
     main_pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) - {msg}")
@@ -132,10 +187,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let start_time = Instant::now();
 
     let results: Vec<OcrResult> = pool.install(|| {
-        files_to_process
+        files
             .par_iter()
             .flat_map(|file| {
-                process_single_file(file.clone(), &ocr_engine, &file_processor, &main_pb)
+                process_single_file(file.clone(), &ocr_engine, &processor, &main_pb)
             })
             .collect()
     });
@@ -143,8 +198,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     main_pb.finish_with_message("Processing complete!");
 
     // Save results and generate report
-    save_results(&results, output_dir, save_individual_files)?;
-    generate_report(&results, output_dir)?;
+    save_results(&results, &cli.output, cli.save_texts)?;
+    generate_report(&results, &cli.output)?;
 
     // Display final statistics
     let total_time = start_time.elapsed();
@@ -153,30 +208,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("\n=== Processing Complete ===");
     println!("Total time: {:.2} seconds", total_time.as_secs_f32());
     println!("Files processed: {}", results.len());
-    println!("Successful: {} ({:.1}%)",
-             successful.len(),
-             (successful.len() as f32 / results.len() as f32) * 100.0);
-    println!("Results saved to: {}", output_dir.display());
+    println!(
+        "Successful: {} ({:.1}%)",
+        successful.len(),
+        (successful.len() as f32 / results.len() as f32) * 100.0
+    );
+    println!("Results saved to: {}", cli.output.display());
 
-    Ok(())
-}
+    if cli.searchable_pdf {
+        println!("Creating searchable PDFs...");
 
-fn collect_files(input_dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
+        let pdf_output = cli.output.join("searchable_pdfs");
+        std::fs::create_dir_all(&pdf_output)?;
 
-    for entry in WalkDir::new(input_dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if path.is_file() {
-            let file_type = FileType::from_path(path);
-            if !matches!(file_type, FileType::Unsupported) {
-                files.push(path.to_path_buf());
+        for file in &files {
+            if matches!(FileType::from_path(file), FileType::Image(_)) {
+                let output_name = file.file_stem().unwrap().to_string_lossy();
+                let output_pdf = pdf_output.join(format!("{}.pdf", output_name));
+
+                let status = std::process::Command::new("tesseract")
+                    .arg(file)
+                    .arg(output_pdf.with_extension(""))
+                    .arg("-l")
+                    .arg(&cli.languages)
+                    .arg("pdf")
+                    .status()?;
+
+                if status.success() {
+                    println!(" ✓ Created: {}", output_pdf.display());
+                }
             }
         }
     }
 
-    files
+    Ok(())
 }

@@ -7,6 +7,10 @@ pub struct OcrEngine {
 }
 
 impl OcrEngine {
+    pub fn language(&self) -> &str {
+        &self.language
+    }
+
     pub fn new(language: &str) -> Result<Self, Box<dyn Error>> {
         Ok(OcrEngine {
             language: language.to_string(),
@@ -22,6 +26,7 @@ impl OcrEngine {
         Ok(rusty_tesseract::image_to_string(&img, &args)?)
     }
 
+    #[allow(dead_code)]
     pub fn extract_text_from_image_data(&self, image_data: &[u8]) -> Result<String, Box<dyn Error>> {
         // Створити тимчасовий файл
         let temp_dir = std::env::temp_dir();
