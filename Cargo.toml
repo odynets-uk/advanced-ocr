@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Core OCR
-tesseract-rs = "0.1.20"
-#tesseract = "0.15.2"
-leptess = "0.14.0"  # Alternative Tesseract wrapper
+## Core OCR
+tesseract = "0.15.2"
 
 # Image processing
 image = "0.25.9"
