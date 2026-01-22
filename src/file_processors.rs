@@ -137,30 +137,6 @@ impl FileProcessor {
         }])
     }
 
-    fn create_searchable_pdf(
-        &self,
-        image_path: &Path,
-        output_path: &Path,
-        ocr_engine: &OcrEngine,
-    ) -> Result<(), Box<dyn Error>> {
-        // Використовуємо tesseract напряму для створення PDF
-        let output_base = output_path.with_extension(""); // без розширення
-
-        let status = std::process::Command::new("tesseract")
-            .arg(image_path)
-            .arg(&output_base)
-            .arg("-l")
-            .arg(ocr_engine.language())
-            .arg("pdf") // ✅ Створити PDF замість txt
-            .status()?;
-
-        if !status.success() {
-            return Err("Tesseract PDF creation failed".into());
-        }
-
-        Ok(())
-    }
-
     fn extract_text_from_pdf_with_ocr(
         &self,
         _path: &Path,

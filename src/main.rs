@@ -1,5 +1,7 @@
 use clap::Parser;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -7,6 +9,8 @@ use std::time::Instant;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use walkdir::WalkDir;
+
+
 
 mod file_processors;
 mod ocr_engine;
@@ -59,6 +63,18 @@ struct Cli {
     /// Create searchable PDFs from images
     #[arg(long)]
     searchable_pdf: bool,
+
+    /// DPI for OCR (default: 300)
+    #[arg(long, default_value = "300")]
+    dpi: u32,
+
+    /// Page segmentation mode (default: 3)
+    #[arg(long, default_value = "3")]
+    psm: u8,
+
+    /// OCR Engine Mode (default: 3)
+    #[arg(long, default_value = "3")]
+    oem: u8,
 }
 
 fn collect_files(input_dir: &Path) -> Vec<PathBuf> {
@@ -170,30 +186,45 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Setup thread pool
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(cli.workers)
-        .build()
-        .unwrap();
+        .build()?;
 
     // Setup progress bars
-    let mp = MultiProgress::new();
-    let main_pb = mp.add(ProgressBar::new(files.len() as u64));
+    let start_time = std::time::Instant::now();
+    let main_pb = ProgressBar::new(files.len() as u64);
     main_pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) - {msg}")
-            .unwrap()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) - {msg}")?
             .progress_chars("#>-"),
     );
 
-    // Process files in parallel
-    let start_time = Instant::now();
+    let processed = Arc::new(AtomicUsize::new(0));
+
+    // Cloning for Threads
+    let pb_clone = main_pb.clone();
+    let processed_clone = Arc::clone(&processed);
 
     let results: Vec<OcrResult> = pool.install(|| {
         files
             .par_iter()
-            .flat_map(|file| {
-                process_single_file(file.clone(), &ocr_engine, &processor, &main_pb)
+            .map(|file| {
+                let file_name = file.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+
+                // Обробка файлу
+                let result = process_single_file(file.clone(), &ocr_engine, &processor, &pb_clone);
+
+                // Atomic increment
+                let count = processed_clone.fetch_add(1, Ordering::SeqCst) + 1;
+                pb_clone.set_position(count as u64);
+                pb_clone.set_message(format!("Processed: {}", file_name));
+
+                result
             })
+            .flatten()
             .collect()
     });
+
 
     main_pb.finish_with_message("Processing complete!");
 
@@ -202,11 +233,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     generate_report(&results, &cli.output)?;
 
     // Display final statistics
-    let total_time = start_time.elapsed();
     let successful: Vec<&OcrResult> = results.iter().filter(|r| r.error.is_none()).collect();
 
+    let total_time = start_time.elapsed();
     println!("\n=== Processing Complete ===");
-    println!("Total time: {:.2} seconds", total_time.as_secs_f32());
+    println!("Total time: {:.2} seconds", total_time.as_secs_f64());
     println!("Files processed: {}", results.len());
     println!(
         "Successful: {} ({:.1}%)",
@@ -216,29 +247,71 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Results saved to: {}", cli.output.display());
 
     if cli.searchable_pdf {
-        println!("Creating searchable PDFs...");
-
+        println!("\nCreating searchable PDFs...");
         let pdf_output = cli.output.join("searchable_pdfs");
         std::fs::create_dir_all(&pdf_output)?;
+        let temp_dir = std::env::temp_dir();
 
-        for file in &files {
-            if matches!(FileType::from_path(file), FileType::Image(_)) {
+        for (file, result) in files.iter().zip(results.iter()) {
+            if matches!(FileType::from_path(file), FileType::Image(_)) && result.error.is_none() {
                 let output_name = file.file_stem().unwrap().to_string_lossy();
                 let output_pdf = pdf_output.join(format!("{}.pdf", output_name));
 
-                let status = std::process::Command::new("tesseract")
-                    .arg(file)
-                    .arg(output_pdf.with_extension(""))
+                let temp_rgb = temp_dir.join(format!("{}_rgb.png", output_name));
+
+                match image::open(file) {
+                    Ok(img) => {
+                        // Конвертувати в RGB і зберегти як PNG
+                        let rgb_img = img.to_rgb8();
+                        if let Err(e) = image::save_buffer(
+                            &temp_rgb,
+                            &rgb_img,
+                            rgb_img.width(),
+                            rgb_img.height(),
+                            image::ColorType::Rgb8,
+                        ) {
+                            eprintln!("  ✗ Failed to convert {}: {}", output_name, e);
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  ✗ Failed to open {}: {}", output_name, e);
+                        continue;
+                    }
+                }
+
+                let output = std::process::Command::new("ocrmypdf")
                     .arg("-l")
                     .arg(&cli.languages)
-                    .arg("pdf")
-                    .status()?;
+                    .arg("--image-dpi")
+                    .arg("300")
+                    .arg(&temp_rgb)
+                    .arg(&output_pdf)
+                    .stderr(std::process::Stdio::piped())
+                    .output();
 
-                if status.success() {
-                    println!(" ✓ Created: {}", output_pdf.display());
+                // Видалити тимчасовий файл
+                let _ = std::fs::remove_file(&temp_rgb);
+
+                match output {
+                    Ok(o) if o.status.success() => {
+                        println!("  ✓ Created: {}", output_pdf.display());
+                    }
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        let error_line = stderr.lines()
+                            .rfind(|l| l.contains("Error:"))
+                            .unwrap_or("Unknown error");
+                        eprintln!("  ✗ Failed {}: {}", output_name, error_line);
+                    }
+                    Err(e) => {
+                        eprintln!("  ✗ Error running ocrmypdf for {}: {}", output_name, e);
+                    }
                 }
             }
         }
+
+        println!("\nSearchable PDFs saved to: {}", pdf_output.display());
     }
 
     Ok(())

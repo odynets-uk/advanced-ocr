@@ -4,25 +4,38 @@ use rusty_tesseract::{Args, Image};
 
 pub struct OcrEngine {
     language: String,
+    dpi: u32,
+    psm: u8,
+    oem: u8,
 }
 
 impl OcrEngine {
-    pub fn language(&self) -> &str {
-        &self.language
+    pub fn new(language: &str) -> Result<Self, Box<dyn Error>> {
+        Self::with_config(language, 300, 3, 3)
     }
 
-    pub fn new(language: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn with_config(language: &str, dpi: u32, psm: u8, oem: u8) -> Result<Self, Box<dyn Error>> {
         Ok(OcrEngine {
             language: language.to_string(),
+            dpi,
+            psm,
+            oem,
         })
+    }
+
+    fn build_args(&self) -> Args {
+        Args {
+            lang: self.language.clone(),
+            dpi: Some(self.dpi as i32),
+            psm: Some(self.psm as i32),
+            oem: Some(self.oem as i32),
+            ..Default::default()
+        }
     }
 
     pub fn extract_text_from_image(&self, image_path: &std::path::Path) -> Result<String, Box<dyn Error>> {
         let img = Image::from_path(image_path)?;
-        let args = Args {
-            lang: self.language.clone(),
-            ..Default::default()
-        };
+        let args = self.build_args();
         Ok(rusty_tesseract::image_to_string(&img, &args)?)
     }
 
@@ -39,10 +52,7 @@ impl OcrEngine {
 
         // OCR з файлу
         let img = Image::from_path(&temp_file)?;
-        let args = Args {
-            lang: self.language.clone(),
-            ..Default::default()
-        };
+        let args = self.build_args();
         let result = rusty_tesseract::image_to_string(&img, &args)?;
 
         // Видалити тимчасовий файл
