@@ -36,3 +36,4 @@ Cargo.lock
 *.pdb
 rust-project.json
 /images/
+/.docs/

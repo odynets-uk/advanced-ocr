@@ -58,8 +58,12 @@ struct Cli {
     output: PathBuf,
 
     /// OCR languages (comma-separated: ukr,eng)
-    #[arg(short, long, default_value = "ukr+eng")]
+    #[arg(short, long, default_value = "ukr+eng", value_parser = parse_languages)]
     languages: String,
+
+    /// List available Tesseract languages and exit
+    #[arg(long)]
+    list_languages: bool,
 
     /// Enable OCR for PDF images (slower)
     #[arg(long, default_value = "false")]
@@ -94,13 +98,38 @@ struct Cli {
     oem: u8,
 
     /// Enable detailed OCR quality analysis
-    #[arg(long, default_value = "false")]
+    #[arg(long, default_value = "true")]
     analyze_quality: bool,
 
     /// Show detailed Tesseract commands and debug output
     #[arg(long, short = 'v')]
     verbose: bool,
+}
 
+fn parse_languages(s: &str) -> Result<String, String> {
+    // Normalize: comma to plus
+    let normalized = s.replace(',', "+");
+
+    // Common language codes for validation (optional)
+    let known_languages = [
+        "ukr", "eng", "rus", "deu", "ita", "fra", "spa", "pol",
+        "ces", "slk", "bul", "hrv", "slv", "por", "nld", "dan",
+        "swe", "nor", "fin", "hun", "ron", "ell", "tur", "ara",
+        "heb", "chi_sim", "chi_tra", "jpn", "kor"
+    ];
+
+    // Validate each language code
+    for lang in normalized.split('+') {
+        let lang = lang.trim().to_lowercase();
+        if !lang.is_empty() && !known_languages.contains(&lang.as_str()) {
+            eprintln!("⚠️  Warning: '{}' might not be installed. Install with:", lang);
+            eprintln!("   Ubuntu: sudo apt install tesseract-ocr-{}", lang);
+            eprintln!("   Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki");
+            eprintln!("   macOS: brew install tesseract-lang");
+        }
+    }
+
+    Ok(normalized)
 }
 
 fn parse_dpi(dpi_arg: &str) -> u32 {
@@ -218,7 +247,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("=== Advanced Batch OCR in Rust ===");
-    println!("Supports: PDF, DOCX, XLSX, JPG, PNG, BMP, TIFF, GIF, WebP");
 
     // Create directories if they don't exist
     std::fs::create_dir_all(&cli.input)?;
@@ -255,6 +283,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("OCR Language: {}", cli.languages);
     println!("OCR DPI: {}", dpi);
     println!("PDF OCR: {}", if cli.pdf_ocr { "enabled" } else { "disabled" });
+
+    // Validate languages (optional, can be skipped for speed)
+    if let Err(e) = OcrEngine::validate_languages(&cli.languages) {
+        eprintln!("Warning: {}", e);
+        // Continue anyway, Tesseract will fail later if really missing
+    }
+
+    // List available languages and exit
+    if cli.list_languages {
+        println!("Available Tesseract languages:");
+        match OcrEngine::check_available_languages() {
+            Ok(langs) => {
+                for lang in langs {
+                    println!("  • {}", lang);
+                }
+            }
+            Err(e) => eprintln!("Error: {}", e),
+        }
+        return Ok(());
+    }
 
     // Initialize OCR engine
     let ocr_engine = OcrEngine::with_config(&cli.languages, dpi, cli.psm, cli.oem, cli.verbose)?;
@@ -325,23 +373,50 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if cli.analyze_quality {
         println!("\n📊 OCR Quality Analysis");
-        println!("{:─<50}", "");
+        println!("{}", "─".repeat(50));
 
         for file in &files {
             if matches!(FileType::from_path(file), FileType::Image(_)) {
-                let words = ocr_engine.extract_with_confidence(file)?;
-                let avg = words.iter().map(|w| w.confidence).sum::<f32>() / words.len() as f32;
+                match ocr_engine.extract_with_confidence(file) {
+                    Ok(words) => {
+                        if !words.is_empty() {
+                            let avg = words.iter().map(|w| w.confidence).sum::<f32>() / words.len() as f32;
 
-                println!("{:<40} {:.1}%",
-                         file.file_name().unwrap().to_string_lossy(),
-                         avg
-                );
+                            // Знайти слова з низькою впевненістю
+                            let low_conf_words: Vec<&str> = words.iter()
+                                .filter(|w| w.confidence < 70.0)
+                                .take(3) // тільки перші 3
+                                .map(|w| w.text.as_str()) // ← тут використовується text
+                                .collect();
+
+                            print!("{:<40} {:.1}%",
+                                   file.file_name().unwrap().to_string_lossy(),
+                                   avg
+                            );
+
+                            if !low_conf_words.is_empty() {
+                                print!("  ⚠️ [{}]", low_conf_words.join(", "));
+                            }
+                            println!();
+                        } else {
+                            println!("{:<40} N/A (no text)",
+                                     file.file_name().unwrap().to_string_lossy()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  ✗ {}: {}", file.file_name().unwrap().to_string_lossy(), e);
+                    }
+                }
             }
         }
+
+        println!("{}", "─".repeat(50));
     }
 
+
     if cli.searchable_pdf {
-        // ✅ Визначити який метод використовувати
+        // determine which method to use
         let (method, method_name) = match cli.pdf_method {
             PdfMethod::Ocrmypdf => {
                 if pdf_creator::check_ocrmypdf_installed() {
@@ -380,7 +455,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        println!("\n✅ PDFs saved to: {}", pdf_output.display());
+        println!("\nPDFs saved to: {}", pdf_output.display());
     }
 
     Ok(())

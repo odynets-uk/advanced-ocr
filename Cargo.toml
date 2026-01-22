@@ -4,11 +4,11 @@ version = "0.3.1"
 edition = "2024"
 
 [dependencies]
-## Core OCR
-rusty-tesseract = "1.1.10"
-
 # Image processing
 image = "0.25.9"
+
+# Languages detection
+whatlang = "0.18.0"
 
 # PDF processing
 pdf = "0.9.1"
