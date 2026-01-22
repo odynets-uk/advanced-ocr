@@ -38,6 +38,12 @@ enum PdfMethod {
     Native,
 }
 
+fn default_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1).max(1))
+        .unwrap_or(1)
+}
+
 /// Advanced Batch OCR in Rust
 #[derive(Parser, Debug)]
 #[command(name = "Advanced OCR")]
@@ -60,7 +66,7 @@ struct Cli {
     pdf_ocr: bool,
 
     /// Number of parallel workers
-    #[arg(short, long, default_value = "4")]
+    #[arg(short, long, default_value_t = default_workers())]
     workers: usize,
 
     /// Save individual text files
@@ -251,19 +257,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Initialize file processor
     let processor = FileProcessor::new(cli.pdf_ocr);
 
-    // Sequential processing for small quantities
-    let worker_count = if files.len() < 10 {
-        1
-    } else {
-        cli.workers.min(files.len())
-    };
+    // Determine optimal worker count
+    let cpu_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
 
-    // Setup thread pool
+    // Scale workers based on file count, but cap at cli.workers
+    let worker_count = files.len().min(cli.workers);
+
+    // Setup thread pool with actual worker count
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(cli.workers)
+        .num_threads(worker_count)
         .build()?;
 
-    println!("Workers: {}", worker_count);
+    println!("Workers: {} (of {} CPU cores, {} files)", worker_count, cpu_count, files.len());
 
     // Setup progress bars
     let start_time = std::time::Instant::now();
