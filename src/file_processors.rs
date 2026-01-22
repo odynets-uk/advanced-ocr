@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-use calamine::{Data, Reader, Xlsx, open_workbook};
+use calamine::{open_workbook, Data, Reader, Xlsx};
 use docx_rs::read_docx;
 
 use crate::ocr_engine::OcrEngine;
@@ -89,9 +89,7 @@ impl FileProcessor {
         path: &Path,
         ocr_engine: &OcrEngine,
     ) -> Result<Vec<ProcessResult>, Box<dyn Error>> {
-        let text = ocr_engine
-            .extract_text_from_image(path)
-            .map_err(|e| format!("OCR error: {}", e))?;
+        let text = ocr_engine.extract_text_from_image(path)?; // повертає String
 
         Ok(vec![ProcessResult {
             file_type: FileType::from_path(path),

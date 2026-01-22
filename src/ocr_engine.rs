@@ -1,5 +1,5 @@
-use std::path::Path;
 use std::error::Error;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub struct OcrEngine {
@@ -16,6 +16,14 @@ pub struct OcrWordResult {
     pub confidence: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct OcrAnalysisResult {
+    pub words: Vec<OcrWordResult>,
+    pub avg_confidence: f32,
+    pub detected_language: Option<String>,
+    pub language_confidence: Option<f64>,
+}
+
 impl OcrEngine {
     pub fn with_config(language: &str, dpi: u32, psm: u8, oem: u8, verbose: bool) -> Result<Self, Box<dyn Error>> {
         Ok(OcrEngine {
@@ -28,7 +36,7 @@ impl OcrEngine {
     }
 
     pub fn extract_with_confidence(&self, image_path: &Path)
-                                   -> Result<Vec<OcrWordResult>, Box<dyn Error>>
+                                   -> Result<OcrAnalysisResult, Box<dyn Error>>
     {
         let output = Command::new("tesseract")
             .arg(image_path)
@@ -46,10 +54,46 @@ impl OcrEngine {
         let tsv = String::from_utf8(output.stdout)?;
         let words = parse_tsv_output(&tsv)?;
 
-        Ok(words)
+        // Calculate average confidence
+        let avg_confidence = if !words.is_empty() {
+            words.iter().map(|w| w.confidence).sum::<f32>() / words.len() as f32
+        } else {
+            0.0
+        };
+
+        // Language detection from full text
+        let full_text: String = words.iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let (detected_language, language_confidence) = if !full_text.is_empty() {
+            match whatlang::detect(&full_text) {
+                Some(info) => {
+                    let lang_code = format!("{:?}", info.lang());
+                    let confidence = info.confidence();
+
+                    if self.verbose {
+                        eprintln!("🌍 Detected: {} ({:.1}%)", lang_code, confidence * 100.0);
+                    }
+
+                    (Some(lang_code), Some(confidence))
+                }
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+        Ok(OcrAnalysisResult {
+            words,
+            avg_confidence,
+            detected_language,
+            language_confidence,
+        })
     }
 
-    pub fn extract_text_from_image(&self, image_path: &std::path::Path) -> Result<String, Box<dyn Error>> {
+    pub fn extract_text_from_image(&self, image_path: &Path) -> Result<String, Box<dyn Error>> {
         let mut cmd = Command::new("tesseract");
         cmd.arg(image_path)
             .arg("stdout")
@@ -93,7 +137,7 @@ impl OcrEngine {
         let langs_text = String::from_utf8(output.stdout)?;
         let langs: Vec<String> = langs_text
             .lines()
-            .skip(1) // Skip "List of available languages" header
+            .skip(1)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();

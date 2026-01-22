@@ -1,8 +1,8 @@
 use clap::Parser;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -373,33 +373,42 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if cli.analyze_quality {
         println!("\n📊 OCR Quality Analysis");
-        println!("{}", "─".repeat(50));
+        println!("{}", "─".repeat(80));
 
         for file in &files {
             if matches!(FileType::from_path(file), FileType::Image(_)) {
                 match ocr_engine.extract_with_confidence(file) {
-                    Ok(words) => {
-                        if !words.is_empty() {
-                            let avg = words.iter().map(|w| w.confidence).sum::<f32>() / words.len() as f32;
-
-                            // Знайти слова з низькою впевненістю
-                            let low_conf_words: Vec<&str> = words.iter()
+                    Ok(analysis) => {
+                        if !analysis.words.is_empty() {
+                            // Low confidence words
+                            let low_conf_words: Vec<&str> = analysis.words.iter()
                                 .filter(|w| w.confidence < 70.0)
-                                .take(3) // тільки перші 3
-                                .map(|w| w.text.as_str()) // ← тут використовується text
+                                .take(3)
+                                .map(|w| w.text.as_str())
                                 .collect();
 
-                            print!("{:<40} {:.1}%",
+                            // Print filename and OCR quality
+                            print!("{:<35} OCR: {:5.1}%",
                                    file.file_name().unwrap().to_string_lossy(),
-                                   avg
+                                   analysis.avg_confidence
                             );
 
+                            // Print detected language
+                            if let Some(lang) = &analysis.detected_language {
+                                let conf = analysis.language_confidence
+                                    .map(|c| format!("{:.0}%", c * 100.0))
+                                    .unwrap_or_else(|| "?".to_string());
+                                print!("  {:4} ({:3})", lang, conf);
+                            }
+
+                            // Print low confidence words warning
                             if !low_conf_words.is_empty() {
                                 print!("  ⚠️ [{}]", low_conf_words.join(", "));
                             }
+
                             println!();
                         } else {
-                            println!("{:<40} N/A (no text)",
+                            println!("{:<35} N/A (no text)",
                                      file.file_name().unwrap().to_string_lossy()
                             );
                         }
@@ -411,7 +420,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        println!("{}", "─".repeat(50));
+        println!("{}", "─".repeat(80));
     }
 
 
