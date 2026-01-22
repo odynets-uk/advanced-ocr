@@ -93,9 +93,14 @@ struct Cli {
     #[arg(long, default_value = "3")]
     oem: u8,
 
+    /// Enable detailed OCR quality analysis
+    #[arg(long, default_value = "false")]
+    analyze_quality: bool,
+
     /// Show detailed Tesseract commands and debug output
     #[arg(long, short = 'v')]
     verbose: bool,
+
 }
 
 fn parse_dpi(dpi_arg: &str) -> u32 {
@@ -294,7 +299,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect()
     });
 
-
     // Finish also via lock
     {
         let pb = main_pb.lock().unwrap();
@@ -318,6 +322,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         (successful.len() as f32 / results.len() as f32) * 100.0
     );
     println!("Results saved to: {}", cli.output.display());
+
+    if cli.analyze_quality {
+        println!("\n📊 OCR Quality Analysis");
+        println!("{:─<50}", "");
+
+        for file in &files {
+            if matches!(FileType::from_path(file), FileType::Image(_)) {
+                let words = ocr_engine.extract_with_confidence(file)?;
+                let avg = words.iter().map(|w| w.confidence).sum::<f32>() / words.len() as f32;
+
+                println!("{:<40} {:.1}%",
+                         file.file_name().unwrap().to_string_lossy(),
+                         avg
+                );
+            }
+        }
+    }
 
     if cli.searchable_pdf {
         // ✅ Визначити який метод використовувати
