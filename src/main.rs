@@ -1,23 +1,22 @@
 use clap::Parser;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use walkdir::WalkDir;
-
-
 
 mod file_processors;
 mod ocr_engine;
 mod utils;
+mod pdf_creator;
 
 use crate::file_processors::{FileProcessor, FileType};
 use crate::ocr_engine::OcrEngine;
+use crate::pdf_creator::{create_searchable_pdf, PdfCreationMethod};
 use crate::utils::{extract_metadata, generate_report, save_results};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -29,6 +28,14 @@ struct OcrResult {
     processing_time_ms: u128,
     error: Option<String>,
     metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum PdfMethod {
+    /// Use ocrmypdf (Python) - best quality, requires installation
+    Ocrmypdf,
+    /// Use native Rust (lopdf) - fast, no dependencies
+    Native,
 }
 
 /// Advanced Batch OCR in Rust
@@ -64,9 +71,13 @@ struct Cli {
     #[arg(long)]
     searchable_pdf: bool,
 
+    /// PDF creation method
+    #[arg(long, value_enum, default_value = "ocrmypdf")]
+    pdf_method: PdfMethod,
+
     /// DPI for OCR (default: 300)
     #[arg(long, default_value = "300")]
-    dpi: u32,
+    dpi: String,
 
     /// Page segmentation mode (default: 3)
     #[arg(long, default_value = "3")]
@@ -75,6 +86,31 @@ struct Cli {
     /// OCR Engine Mode (default: 3)
     #[arg(long, default_value = "3")]
     oem: u8,
+
+    /// Show detailed Tesseract commands and debug output
+    #[arg(long, short = 'v')]
+    verbose: bool,
+}
+
+fn parse_dpi(dpi_arg: &str) -> u32 {
+    match dpi_arg.to_lowercase().as_str() {
+        "screen" => {
+            #[cfg(target_os = "windows")]
+            {
+                96
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                72  // macOS, Linux
+            }
+        }
+        _ => {
+            dpi_arg.parse::<u32>().unwrap_or_else(|_| {
+                eprintln!("⚠️  Invalid DPI value '{}', using default 300", dpi_arg);
+                300
+            })
+        }
+    }
 }
 
 fn collect_files(input_dir: &Path) -> Vec<PathBuf> {
@@ -101,12 +137,16 @@ fn process_single_file(
     path: PathBuf,
     ocr_engine: &OcrEngine,
     file_processor: &FileProcessor,
-    pb: &ProgressBar,
+    pb: &Arc<Mutex<ProgressBar>>,
 ) -> Vec<OcrResult> {
     let start = Instant::now();
     let filename = path.file_name().unwrap().to_string_lossy().to_string();
 
-    pb.set_message(format!("Processing: {}", filename));
+    // Lock для set_message
+    {
+        let pb_guard = pb.lock().unwrap();
+        pb_guard.set_message(format!("Processing: {}", filename));
+    }
 
     let mut results = Vec::new();
 
@@ -143,7 +183,12 @@ fn process_single_file(
         }
     }
 
-    pb.inc(1);
+    //Lock для inc
+    {
+        let pb_guard = pb.lock().unwrap();
+        pb_guard.inc(1);
+    }
+
     results
 }
 
@@ -153,6 +198,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Initialize logging
     env_logger::init();
+
+    // Install once at the beginning (safe), disable debug output if not verbose
+    if !cli.verbose {
+        unsafe {
+            std::env::set_var("TESSERACT_QUIET", "1");
+        }
+    }
 
     println!("=== Advanced Batch OCR in Rust ===");
     println!("Supports: PDF, DOCX, XLSX, JPG, PNG, BMP, TIFF, GIF, WebP");
@@ -172,61 +224,75 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("Input directory was empty".into());
     }
 
+    let dpi = parse_dpi(&cli.dpi);
+
+    #[cfg(target_os = "windows")]
+    let platform = "Windows";
+    #[cfg(target_os = "macos")]
+    let platform = "macOS";
+    #[cfg(target_os = "linux")]
+    let platform = "Linux";
+
+    if cli.dpi.to_lowercase() == "screen" {
+        println!("Using screen DPI for {}: {}", platform, dpi);
+    }
+
+    // parsing dpi
+    let dpi = parse_dpi(&cli.dpi);
+
     println!("\nFound {} files to process", files.len());
     println!("OCR Language: {}", cli.languages);
+    println!("OCR DPI: {}", dpi);
     println!("PDF OCR: {}", if cli.pdf_ocr { "enabled" } else { "disabled" });
-    println!("Workers: {}", cli.workers);
 
     // Initialize OCR engine
-    let ocr_engine = OcrEngine::new(&cli.languages)?;
+    let ocr_engine = OcrEngine::with_config(&cli.languages, dpi, cli.psm, cli.oem, cli.verbose)?;
 
     // Initialize file processor
     let processor = FileProcessor::new(cli.pdf_ocr);
+
+    // Sequential processing for small quantities
+    let worker_count = if files.len() < 10 {
+        1
+    } else {
+        cli.workers.min(files.len())
+    };
 
     // Setup thread pool
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(cli.workers)
         .build()?;
 
+    println!("Workers: {}", worker_count);
+
     // Setup progress bars
     let start_time = std::time::Instant::now();
-    let main_pb = ProgressBar::new(files.len() as u64);
-    main_pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) - {msg}")?
-            .progress_chars("#>-"),
-    );
-
-    let processed = Arc::new(AtomicUsize::new(0));
-
-    // Cloning for Threads
-    let pb_clone = main_pb.clone();
-    let processed_clone = Arc::clone(&processed);
+    let main_pb = Arc::new(Mutex::new(ProgressBar::new(files.len() as u64)));
+    {
+        let pb = main_pb.lock().unwrap();
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) - {msg}")?
+                .progress_chars("#>-"),
+        );
+    }
 
     let results: Vec<OcrResult> = pool.install(|| {
         files
             .par_iter()
             .map(|file| {
-                let file_name = file.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown");
-
-                // Обробка файлу
-                let result = process_single_file(file.clone(), &ocr_engine, &processor, &pb_clone);
-
-                // Atomic increment
-                let count = processed_clone.fetch_add(1, Ordering::SeqCst) + 1;
-                pb_clone.set_position(count as u64);
-                pb_clone.set_message(format!("Processed: {}", file_name));
-
-                result
+                process_single_file(file.clone(), &ocr_engine, &processor, &main_pb)
             })
             .flatten()
             .collect()
     });
 
 
-    main_pb.finish_with_message("Processing complete!");
+    // Finish also via lock
+    {
+        let pb = main_pb.lock().unwrap();
+        pb.finish_with_message("Processing complete!");
+    }
 
     // Save results and generate report
     save_results(&results, &cli.output, cli.save_texts)?;
@@ -247,71 +313,46 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Results saved to: {}", cli.output.display());
 
     if cli.searchable_pdf {
-        println!("\nCreating searchable PDFs...");
+        // ✅ Визначити який метод використовувати
+        let (method, method_name) = match cli.pdf_method {
+            PdfMethod::Ocrmypdf => {
+                if pdf_creator::check_ocrmypdf_installed() {
+                    (PdfCreationMethod::OcrMyPdf, "ocrmypdf")
+                } else {
+                    eprintln!("\n⚠️  ocrmypdf is not installed, falling back to native Rust method");
+                    eprintln!("\n📦 To use ocrmypdf (recommended for searchable PDFs):");
+                    eprintln!("  • Windows: pip install ocrmypdf");
+                    eprintln!("  • Linux: sudo apt install ocrmypdf");
+                    eprintln!("  • macOS: brew install ocrmypdf");
+                    eprintln!("  📚 More info: https://ocrmypdf.readthedocs.io/en/latest/installation.html");
+                    eprintln!("\n⚠️  Native method will create image-only PDFs (text not searchable)\n");
+                    (PdfCreationMethod::Native, "native (image-only)")
+                }
+            }
+            PdfMethod::Native => {
+                eprintln!("\n⚠️  Using native Rust method - PDFs will contain images only (not searchable)");
+                eprintln!("💡 For searchable PDFs, use --pdf-method ocrmypdf\n");
+                (PdfCreationMethod::Native, "native (image-only)")
+            }
+        };
+
+        println!("🔍 Creating PDFs using: {}", method_name);
         let pdf_output = cli.output.join("searchable_pdfs");
         std::fs::create_dir_all(&pdf_output)?;
-        let temp_dir = std::env::temp_dir();
 
         for (file, result) in files.iter().zip(results.iter()) {
             if matches!(FileType::from_path(file), FileType::Image(_)) && result.error.is_none() {
                 let output_name = file.file_stem().unwrap().to_string_lossy();
                 let output_pdf = pdf_output.join(format!("{}.pdf", output_name));
 
-                let temp_rgb = temp_dir.join(format!("{}_rgb.png", output_name));
-
-                match image::open(file) {
-                    Ok(img) => {
-                        // Конвертувати в RGB і зберегти як PNG
-                        let rgb_img = img.to_rgb8();
-                        if let Err(e) = image::save_buffer(
-                            &temp_rgb,
-                            &rgb_img,
-                            rgb_img.width(),
-                            rgb_img.height(),
-                            image::ColorType::Rgb8,
-                        ) {
-                            eprintln!("  ✗ Failed to convert {}: {}", output_name, e);
-                            continue;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("  ✗ Failed to open {}: {}", output_name, e);
-                        continue;
-                    }
-                }
-
-                let output = std::process::Command::new("ocrmypdf")
-                    .arg("-l")
-                    .arg(&cli.languages)
-                    .arg("--image-dpi")
-                    .arg("300")
-                    .arg(&temp_rgb)
-                    .arg(&output_pdf)
-                    .stderr(std::process::Stdio::piped())
-                    .output();
-
-                // Видалити тимчасовий файл
-                let _ = std::fs::remove_file(&temp_rgb);
-
-                match output {
-                    Ok(o) if o.status.success() => {
-                        println!("  ✓ Created: {}", output_pdf.display());
-                    }
-                    Ok(o) => {
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        let error_line = stderr.lines()
-                            .rfind(|l| l.contains("Error:"))
-                            .unwrap_or("Unknown error");
-                        eprintln!("  ✗ Failed {}: {}", output_name, error_line);
-                    }
-                    Err(e) => {
-                        eprintln!("  ✗ Error running ocrmypdf for {}: {}", output_name, e);
-                    }
+                match create_searchable_pdf(file, &result.text, &output_pdf, &cli.languages, method) {
+                    Ok(_) => println!("  ✓ {}", output_name),
+                    Err(e) => eprintln!("  ✗ {}: {}", output_name, e),
                 }
             }
         }
 
-        println!("\nSearchable PDFs saved to: {}", pdf_output.display());
+        println!("\n✅ PDFs saved to: {}", pdf_output.display());
     }
 
     Ok(())

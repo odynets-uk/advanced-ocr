@@ -1,63 +1,54 @@
 use std::error::Error;
-use std::io::Write;
-use rusty_tesseract::{Args, Image};
+use std::process::{Command, Stdio};
 
 pub struct OcrEngine {
     language: String,
     dpi: u32,
     psm: u8,
     oem: u8,
+    verbose: bool,
 }
 
 impl OcrEngine {
-    pub fn new(language: &str) -> Result<Self, Box<dyn Error>> {
-        Self::with_config(language, 300, 3, 3)
-    }
-
-    pub fn with_config(language: &str, dpi: u32, psm: u8, oem: u8) -> Result<Self, Box<dyn Error>> {
+    pub fn with_config(language: &str, dpi: u32, psm: u8, oem: u8, verbose: bool) -> Result<Self, Box<dyn Error>> {
         Ok(OcrEngine {
             language: language.to_string(),
             dpi,
             psm,
             oem,
+            verbose,
         })
     }
 
-    fn build_args(&self) -> Args {
-        Args {
-            lang: self.language.clone(),
-            dpi: Some(self.dpi as i32),
-            psm: Some(self.psm as i32),
-            oem: Some(self.oem as i32),
-            ..Default::default()
-        }
-    }
-
     pub fn extract_text_from_image(&self, image_path: &std::path::Path) -> Result<String, Box<dyn Error>> {
-        let img = Image::from_path(image_path)?;
-        let args = self.build_args();
-        Ok(rusty_tesseract::image_to_string(&img, &args)?)
-    }
+        let mut cmd = Command::new("tesseract");
+        cmd.arg(image_path)
+            .arg("stdout")
+            .arg("-l").arg(&self.language)
+            .arg("--dpi").arg(self.dpi.to_string())
+            .arg("--psm").arg(self.psm.to_string())
+            .arg("--oem").arg(self.oem.to_string());
 
-    #[allow(dead_code)]
-    pub fn extract_text_from_image_data(&self, image_data: &[u8]) -> Result<String, Box<dyn Error>> {
-        // Створити тимчасовий файл
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("ocr_temp_{}.png", std::process::id()));
+        // hide stderr if not verbose
+        if self.verbose {
+            eprintln!("🔧 Tesseract: tesseract {} stdout -l {} --dpi {} --psm {} --oem {}",
+                      image_path.display(),
+                      self.language,
+                      self.dpi,
+                      self.psm,
+                      self.oem
+            );
+        } else {
+            cmd.stderr(Stdio::null());
+        }
 
-        // Зберегти дані у файл
-        let mut file = std::fs::File::create(&temp_file)?;
-        file.write_all(image_data)?;
-        drop(file); // Закрити файл
+        let output = cmd.output()?;
 
-        // OCR з файлу
-        let img = Image::from_path(&temp_file)?;
-        let args = self.build_args();
-        let result = rusty_tesseract::image_to_string(&img, &args)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Tesseract failed: {}", stderr).into());
+        }
 
-        // Видалити тимчасовий файл
-        let _ = std::fs::remove_file(&temp_file);
-
-        Ok(result)
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
 }
